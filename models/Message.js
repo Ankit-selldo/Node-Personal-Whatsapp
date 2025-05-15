@@ -1,4 +1,4 @@
-const mongoose = require('mongoose');
+const mongoose = require("mongoose");
 
 const messageSchema = new mongoose.Schema({
   userId: String,
@@ -6,7 +6,7 @@ const messageSchema = new mongoose.Schema({
   sender: String,
   message: String,
   timestamp: String,
-  createdAt: { type: Date, default: Date.now }
+  createdAt: { type: Date, default: Date.now },
 });
 
-module.exports = mongoose.model('Message', messageSchema);
+module.exports = mongoose.model("Message", messageSchema);
