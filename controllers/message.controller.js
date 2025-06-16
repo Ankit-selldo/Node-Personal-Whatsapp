@@ -35,12 +35,27 @@ exports.sendMessage = async (req, res) => {
         .json({ error: "WhatsApp client not ready or not authenticated" });
     }
 
-    // Get active client instance
-    const client = getClient(userId);
+    // Get active client instance - CHANGED: Now using await since getClient is async
+    const client = await getClient(userId);
     if (!client) {
       return res
         .status(400)
         .json({ error: "WhatsApp client instance not found" });
+    }
+
+    // Verify client state before sending message
+    try {
+      const clientState = await client.getState();
+      if (clientState !== 'CONNECTED') {
+        return res
+          .status(400)
+          .json({ error: `WhatsApp client is not connected. Current state: ${clientState}` });
+      }
+    } catch (stateError) {
+      console.error("Error checking client state:", stateError);
+      return res
+        .status(400)
+        .json({ error: "WhatsApp client connection error" });
     }
 
     // Format the chat ID

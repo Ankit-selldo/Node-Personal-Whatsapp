@@ -18,6 +18,45 @@ exports.connectSession = async (req, res) => {
       return res.json({ status: "pending", qr });
     }
 
+    // Check if client exists in activeClients but verify it's actually connected
+    // Check if client exists in activeClients but verify it's actually connected
+const { getClient } = require("../helpers/create-client-helper");
+const activeClient = await getClient(userId);
+
+// If client claims to be authenticated but no active client exists, it's disconnected
+if (state && state.isAuthenticated && !activeClient) {
+  console.log(`[connectSession] Client ${userId} claims authenticated but no active instance found - marking as disconnected`);
+  
+  // Update database to reflect actual disconnection
+  await Promise.all([
+    WhatsAppClient.findOneAndUpdate(
+      { userId },
+      {
+        isAuthenticated: false,
+        isActive: false,
+        sessionStatus: 'DISCONNECTED',
+        qr: null,
+        lastActive: new Date()
+      }
+    ),
+    WhatsAppSession.findOneAndUpdate(
+      { userId },
+      {
+        state: { 
+          status: 'DISCONNECTED', 
+          reason: 'Client instance not found',
+          disconnectedAt: new Date()
+        },
+        lastUpdate: new Date()
+      }
+    )
+  ]);
+  
+  // Create new client instance
+  const qr = await createClient(userId, false);
+  return res.json({ status: "pending", qr });
+}
+
     // If user exists but session is logged out from WhatsApp
     if (session?.state?.status === 'DISCONNECTED' || state.sessionStatus === 'DISCONNECTED') {
       // Clear existing session data
@@ -42,7 +81,7 @@ exports.connectSession = async (req, res) => {
     }
 
     // If user exists and was manually logged out (but not from WhatsApp)
-    if (state.sessionStatus === 'LOGGED_OUT' && session?.data) {
+    if (state.sessionStatus === 'LOGGED_OUT' && session?.data && activeClient) {
       try {
         await createClient(userId, true); // try to restore session
         state = await WhatsAppClient.findOneAndUpdate(
@@ -63,11 +102,11 @@ exports.connectSession = async (req, res) => {
       }
     }
 
-    // Return existing session status
-    if (state.isAuthenticated) {
+    // Return existing session status only if client is actually active
+    if (state.isAuthenticated && activeClient) {
       return res.json({ status: "authenticated" });
     }
-    if (state.qr) {
+    if (state.qr && !state.isAuthenticated) {
       return res.json({ status: "pending", qr: state.qr });
     }
 

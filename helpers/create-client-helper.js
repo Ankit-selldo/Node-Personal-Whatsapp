@@ -13,10 +13,37 @@ const WhatsAppSession = require("../models/WhatsAppSession");
 // Add a map to store active clients
 const activeClients = new Map();
 
+function ensureWwebjsDirectories() {
+  const baseAuthDir = path.join(process.cwd(), '.wwebjs_auth');
+  const undefinedDir = path.join(baseAuthDir, 'wwebjs_temp_session_undefined', 'Default');
+
+  try {
+    // Create the directories if they don't exist
+    if (!fs.existsSync(undefinedDir)) {
+      fs.mkdirSync(undefinedDir, { recursive: true });
+      console.log('[Fix] Created missing wwebjs directories to prevent crash');
+    }
+  } catch (error) {
+    console.log('[Fix] Could not create directories, but continuing...');
+  }
+}
+
+function ensureAuthDirectory() {
+  const authDir = path.join(process.cwd(), '.wwebjs_auth');
+  if (!fs.existsSync(authDir)) {
+    fs.mkdirSync(authDir, { recursive: true });
+    console.log('[createClient] Created .wwebjs_auth directory');
+  }
+}
+
 // Create a new WhatsApp client instance
 async function createClient(userId, isRestoring = false) {
   return new Promise(async (resolve, reject) => {
     try {
+
+      ensureWwebjsDirectories();
+      ensureAuthDirectory();  
+
       console.log(`[createClient] Starting client creation for user ${userId} (isRestoring: ${isRestoring})`);
       
       // Step 1: Check existing state
@@ -78,18 +105,21 @@ async function createClient(userId, isRestoring = false) {
       }
 
       // Step 5: Create new client instance
-      console.log(`[createClient] Creating new WhatsApp client for ${userId}`);
-      const client = new Client({
-        authStrategy: new RemoteAuth({
-          store: store,
-          backupSyncIntervalMs: 300000,
-          session: userId
-        }),
-        puppeteer: {
-          headless: true,
-          args: ["--no-sandbox", "--disable-setuid-sandbox"],
-        },
-      });
+      // Step 5: Create new client instance
+    // Step 5: Create new client instance
+    console.log(`[createClient] Creating new WhatsApp client for ${userId}`);
+    const client = new Client({
+    authStrategy: new RemoteAuth({
+    store: store,
+    backupSyncIntervalMs: 300000,
+    session: userId
+    // Remove dataPath - let WhatsApp handle it automatically
+  }),
+    puppeteer: {
+    headless: true,
+    args: ["--no-sandbox", "--disable-setuid-sandbox"],
+  },
+});
 
       // Step 6: Initialize client state
       activeClients.set(userId, client);
@@ -173,9 +203,9 @@ async function createClient(userId, isRestoring = false) {
       client.on("authenticated", async () => {
         console.log(`[createClient] Authentication successful for ${userId}`);
         authenticationResolved = true;
-
+      
         try {
-          // First update the client state
+          // Update client state
           await WhatsAppClient.findOneAndUpdate(
             { userId },
             {
@@ -186,51 +216,154 @@ async function createClient(userId, isRestoring = false) {
               lastActive: new Date()
             }
           );
-
+      
           console.log(`[createClient] Updated client state for ${userId}`);
-
-          // Then extract and save session data
-          const sessionData = await store.extract({ session: userId });
-          if (!sessionData) {
-            console.error(`[createClient] No session data found after authentication for ${userId}`);
-            return reject(new Error("No session data found after authentication"));
-          }
-
-          console.log(`[createClient] Extracted session data for ${userId}`, {
-            dataExists: true,
-            dataKeys: Object.keys(sessionData),
-            dataSize: JSON.stringify(sessionData).length
-          });
-
-          // Save session data and wait for it to complete
-          await store.save({ session: userId });
-          
-          // Verify the session was saved
-          const savedSession = await WhatsAppSession.findOne({ userId });
-          console.log(`[createClient] Verified saved session for ${userId}:`, {
-            exists: !!savedSession,
-            hasData: !!savedSession?.data,
-            dataKeys: savedSession?.data ? Object.keys(savedSession.data) : [],
-            state: savedSession?.state
-          });
-
-          if (!savedSession?.data) {
-            console.error(`[createClient] Session verification failed for ${userId}`);
-            return reject(new Error("Session verification failed after save"));
-          }
-
-          console.log(`[createClient] Successfully completed authentication flow for ${userId}`);
-          
+      
           // Only resolve if we haven't already resolved with a QR code
           if (!qrCodeGenerated) {
             resolve(null);
           }
         } catch (error) {
           console.error(`[createClient] Error during authentication for ${userId}:`, error);
-          reject(error);
+          if (!qrCodeGenerated) {
+            resolve(null);
+          }
+        }
+      });
+      // Add these event handlers after the "authenticated" event handler in createClient function
+
+      client.on("ready", async () => {
+        console.log(`[createClient] Client ready event received for ${userId}`);
+        
+        try {
+          // Now save the session when client is fully ready
+          setTimeout(async () => {
+            try {
+              // The session data will be available now
+              console.log(`[createClient] Attempting to save session for ready client ${userId}`);
+              await store.save({ session: userId });
+              
+              const savedSession = await WhatsAppSession.findOne({ userId });
+              console.log(`[createClient] Session save attempt completed for ${userId}:`, {
+                exists: !!savedSession,
+                hasData: !!savedSession?.data
+              });
+            } catch (saveError) {
+              console.error(`[createClient] Error saving session for ${userId}:`, saveError);
+            }
+          }, 3000); // Wait 3 seconds for session to be fully established
+          
+        } catch (error) {
+          console.error(`[createClient] Error in ready event for ${userId}:`, error);
         }
       });
 
+// NEW: Add disconnection event handler
+client.on("disconnected", async (reason) => {
+  console.log(`[createClient] Client disconnected for ${userId}:`, reason);
+  
+  // Update database to reflect disconnection
+  await Promise.all([
+    WhatsAppClient.findOneAndUpdate(
+      { userId },
+      {
+        isAuthenticated: false,
+        isActive: false,
+        sessionStatus: 'DISCONNECTED',
+        qr: null,
+        lastActive: new Date()
+      }
+    ),
+    WhatsAppSession.findOneAndUpdate(
+      { userId },
+      {
+        state: { 
+          status: 'DISCONNECTED', 
+          reason: reason,
+          disconnectedAt: new Date()
+        },
+        lastUpdate: new Date()
+      }
+    )
+  ]);
+
+  // Remove from active clients
+  if (activeClients.has(userId)) {
+    activeClients.delete(userId);
+    console.log(`[createClient] Removed disconnected client ${userId} from activeClients`);
+  }
+});
+
+// NEW: Add authentication failure event handler
+client.on("auth_failure", async (message) => {
+  console.log(`[createClient] Authentication failed for ${userId}:`, message);
+  
+  // Update database to reflect auth failure
+  await Promise.all([
+    WhatsAppClient.findOneAndUpdate(
+      { userId },
+      {
+        isAuthenticated: false,
+        isActive: false,
+        sessionStatus: 'DISCONNECTED',
+        qr: null,
+        lastActive: new Date()
+      }
+    ),
+    WhatsAppSession.findOneAndUpdate(
+      { userId },
+      {
+        state: { 
+          status: 'AUTH_FAILED', 
+          error: message,
+          failedAt: new Date()
+        },
+        lastUpdate: new Date()
+      }
+    )
+  ]);
+
+  // Remove from active clients
+  if (activeClients.has(userId)) {
+    activeClients.delete(userId);
+    console.log(`[createClient] Removed failed auth client ${userId} from activeClients`);
+  }
+});
+
+client.on("auth_failure", async (message) => {
+  console.log(`[createClient] Authentication failed for ${userId}:`, message);
+  
+  // Update database to reflect auth failure
+  await Promise.all([
+    WhatsAppClient.findOneAndUpdate(
+      { userId },
+      {
+        isAuthenticated: false,
+        isActive: false,
+        sessionStatus: 'DISCONNECTED',
+        qr: null,
+        lastActive: new Date()
+      }
+    ),
+    WhatsAppSession.findOneAndUpdate(
+      { userId },
+      {
+        state: { 
+          status: 'AUTH_FAILED', 
+          error: message,
+          failedAt: new Date()
+        },
+        lastUpdate: new Date()
+      }
+    )
+  ]);
+
+  // Remove from active clients
+  if (activeClients.has(userId)) {
+    activeClients.delete(userId);
+    console.log(`[createClient] Removed failed auth client ${userId} from activeClients`);
+  }
+});
       // Initialize the client
       await client.initialize();
 
@@ -384,8 +517,91 @@ async function restoreSessions() {
 }
 
 // Get an active client instance
-function getClient(userId) {
-  return activeClients.get(userId);
+// Replace the existing getClient function
+// UPDATED: Get an active client instance with connection verification
+async function getClient(userId) {
+  const client = activeClients.get(userId);
+  if (!client) return null;
+  
+  try {
+    // Verify client is actually connected
+    const state = await client.getState();
+    if (state !== 'CONNECTED') {
+      console.log(`[getClient] Client ${userId} is not in CONNECTED state:`, state);
+      
+      // Update database and remove from active clients
+      await Promise.all([
+        WhatsAppClient.findOneAndUpdate(
+          { userId },
+          {
+            isAuthenticated: false,
+            isActive: false,
+            sessionStatus: 'DISCONNECTED',
+            lastActive: new Date()
+          }
+        ),
+        WhatsAppSession.findOneAndUpdate(
+          { userId },
+          {
+            state: { 
+              status: 'DISCONNECTED', 
+              reason: `Client state: ${state}`,
+              disconnectedAt: new Date()
+            },
+            lastUpdate: new Date()
+          }
+        )
+      ]);
+      
+      activeClients.delete(userId);
+      return null;
+    }
+    
+    return client;
+  } catch (error) {
+    console.log(`[getClient] Error checking client ${userId} state:`, error.message);
+    
+    // Client is likely disconnected, clean up
+    await Promise.all([
+      WhatsAppClient.findOneAndUpdate(
+        { userId },
+        {
+          isAuthenticated: false,
+          isActive: false,
+          sessionStatus: 'DISCONNECTED',
+          lastActive: new Date()
+        }
+      ),
+      WhatsAppSession.findOneAndUpdate(
+        { userId },
+        {
+          state: { 
+            status: 'DISCONNECTED', 
+            reason: error.message,
+            disconnectedAt: new Date()
+          },
+          lastUpdate: new Date()
+        }
+      )
+    ]);
+    
+    activeClients.delete(userId);
+    return null;
+  }
+}
+// Function to check if a client is actually connected
+async function isClientConnected(userId) {
+  const client = activeClients.get(userId);
+  if (!client) return false;
+  
+  try {
+    // Try to get client state - this will fail if disconnected
+    const state = await client.getState();
+    return state === 'CONNECTED';
+  } catch (error) {
+    console.log(`[isClientConnected] Client ${userId} connection check failed:`, error.message);
+    return false;
+  }
 }
 
 module.exports = {
@@ -393,5 +609,6 @@ module.exports = {
   restoreSessions,
   getClient,
   cleanupInvalidSessions,
-  resetAllSessions  // Export for debugging
+  resetAllSessions,
+  isClientConnected // Export for debugging
 };

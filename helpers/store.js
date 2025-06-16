@@ -14,7 +14,7 @@ class Store {
       console.log(`[Store] Session exists for ${options.session}: ${exists}`);
       return exists;
     } catch (error) {
-      console.error('[Store] Error checking session existence:', error);
+      console.error('[Store] Error checking session existence:', error); 
       return false;
     }
   }
@@ -24,14 +24,22 @@ class Store {
       const { session } = options;
       console.log(`[Store] Attempting to save session for: ${session}`);
       
-      // Extract the session data
-      const sessionData = await this.extract(options);
-      if (!sessionData) {
-        console.error('[Store] No session data to save');
+      // Don't save if session is invalid
+      if (session === 'RemoteAuth' || !session || session.includes('undefined')) {
+        console.log(`[Store] Invalid session identifier: ${session}, skipping save`);
         return;
       }
 
-      console.log(`[Store] Found valid session data for ${session}`, {
+      // Get the session data from the options directly (RemoteAuth passes it)
+      let sessionData = options.sessionData;
+      
+      // If no session data in options, return early
+      if (!sessionData) {
+        console.log(`[Store] No session data provided for ${session}`);
+        return;
+      }
+
+      console.log(`[Store] Saving session data for ${session}`, {
         dataKeys: Object.keys(sessionData),
         dataSize: JSON.stringify(sessionData).length
       });
@@ -52,28 +60,31 @@ class Store {
         { upsert: true, new: true }
       );
 
-      console.log(`[Store] Session saved successfully for user: ${session}`, {
-        sessionId: updatedSession.sessionId,
-        hasData: !!updatedSession.data,
-        dataKeys: updatedSession.data ? Object.keys(updatedSession.data) : [],
-        state: updatedSession.state
-      });
+      console.log(`[Store] Session saved successfully for user: ${session}`);
     } catch (error) {
       console.error('[Store] Error saving session:', error);
-      throw error;
+      // Don't throw error to prevent crashes
     }
   }
 
   async extract(options) {
     try {
-      console.log(`[Store] Extracting session data for: ${options.session}`);
-      const session = await WhatsAppSession.findOne({ userId: options.session });
-      const hasData = !!session?.data;
-      console.log(`[Store] Session data found for ${options.session}: ${hasData}`);
-      if (hasData) {
-        console.log(`[Store] Session data keys:`, Object.keys(session.data));
+      const { session } = options;
+      console.log(`[Store] Extracting session data for: ${session}`);
+      
+      // Don't extract if session is invalid
+      if (session === 'RemoteAuth' || !session || session.includes('undefined')) {
+        console.log(`[Store] Invalid session identifier: ${session}, returning null`);
+        return null;
       }
-      return session?.data || null;
+      
+      const sessionRecord = await WhatsAppSession.findOne({ userId: session });
+      const hasData = !!sessionRecord?.data;
+      console.log(`[Store] Session data found for ${session}: ${hasData}`);
+      if (hasData) {
+        console.log(`[Store] Session data keys:`, Object.keys(sessionRecord.data));
+      }
+      return sessionRecord?.data || null;
     } catch (error) {
       console.error('[Store] Error extracting session:', error);
       return null;
@@ -82,23 +93,28 @@ class Store {
 
   async delete(options) {
     try {
-      console.log(`[Store] Deleting session for: ${options.session}`);
+      const { session } = options;
+      console.log(`[Store] Deleting session for: ${session}`);
+      
+      if (session === 'RemoteAuth' || !session || session.includes('undefined')) {
+        console.log(`[Store] Invalid session identifier: ${session}, skipping delete`);
+        return;
+      }
+      
       await WhatsAppSession.findOneAndUpdate(
-        { userId: options.session },
+        { userId: session },
         { 
           $unset: { data: 1 },
           state: { status: 'DELETED' },
           lastUpdate: new Date()
         }
       );
-      console.log(`[Store] Session deleted for: ${options.session}`);
+      console.log(`[Store] Session deleted for: ${session}`);
     } catch (error) {
       console.error('[Store] Error deleting session:', error);
-      throw error;
     }
   }
 
-  // New method to get all active sessions
   async getActiveSessions() {
     try {
       return await WhatsAppSession.find(
