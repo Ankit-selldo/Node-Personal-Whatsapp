@@ -1,0 +1,11 @@
+# packages
+node_modules/
+
+# Environment Variables
+.env
+.env.*
+
+# WhatsApp Auth and Cache
+.wwebjs_auth/
+.wwebjs_cache/
+/generated/prisma
