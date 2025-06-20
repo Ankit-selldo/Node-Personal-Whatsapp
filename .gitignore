@@ -8,3 +8,4 @@ node_modules/
 # WhatsApp Auth and Cache
 .wwebjs_auth/
 .wwebjs_cache/
+/generated/prisma
